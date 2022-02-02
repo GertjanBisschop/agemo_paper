@@ -1,0 +1,265 @@
+\documentclass[10pt, a4]{article}
+\usepackage{natbib}
+\bibliographystyle{apalike}
+\usepackage{geometry}
+\usepackage{lineno}
+
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[linesnumbered, ruled]{algorithm2e}
+\linespread{1.3}
+
+\newcommand{\beginsupplement}{%
+        \setcounter{table}{0}
+        \renewcommand{\thetable}{S\arabic{table}}%
+        \setcounter{figure}{0}
+        \renewcommand{\thefigure}{S\arabic{figure}}%
+     }
+
+\usepackage{titling}
+\title{Agemo: an open-source library for Laplace transformed coalescence time distributions.}
+\author{Gertjan Bisschop \thanks{g.bisschop@sms.ed.ac.uk} \\ Institute of Evolutionary Biology, University of Edinburgh, EH9 3FL Edinburgh, Scotland}
+\date{}
+
+%%%
+\pretitle{\begin{flushright}\LARGE} % makes document title flush right
+\posttitle{\end{flushright}}
+\preauthor{\begin{flushright}\large} % makes author flush right
+\postauthor{\end{flushright}}
+\predate{\begin{flushright}\large} % makes date title flush right
+\postdate{\end{flushright}}
+
+\begin{document}
+
+\maketitle
+
+%%ABSTRACT
+\section*{Abstract}
+\texttt{agemo} is an open-source tool with a python API that allows users to generate the Laplace transform of the coalescence time distribution of a sample with a given demographic history. In addition, \texttt{agemo} provides ways to efficiently query that distribution, by using the fact that its generating function can be represented most simply as a directed graph with all possible ancestral states of the sample as nodes. Past implementations have not made full use of this, relying on computer algebra systems instead of graph traversal to process these recursive expressions.
+\texttt{agemo} can be used to compute the probabilities of the joint site frequency spectrum for blocks of a given size, under models of isolation and migration. Calculating these probabilities requires repeated differentiation of the generating function which suffers from an explosion in the number of terms when implemented naively. Using a closed-form expression for the coefficients of a series expansion of the equations associated with each edge, we can efficiently propagate these coefficients through the graph avoiding redundant operations.
+
+\vspace{0.25cm} 
+\linenumbers
+
+%%INTRODUCTION
+\section{Introduction}
+
+Laplace transforms have been used extensively in coalescent theory since the introduction of the structured coalescent \citep{Takahata1988, Notohara1990, Barton1995}. Initially it was a formal tool to analyse continuous-time Markov chains \citep{Takahata1988, Griffiths1991, Wilkinson-herbots1998}. But as noted by \citet{Wilkinson-herbots1998} the Laplace transforms of the distributions of coalescence times are also interesting in their own right. The Laplace transform of a random variable has a clear probabilistic interpretation. Think of that random variable as describing the length of an interval. If a Poisson marking process with intensity $\omega$ marks the interval, then the Laplace transform $f^*(\omega)$ is the probability of not observing any marks in the considered interval \citep{Rade1972}. Let the random variable be the stochastic process modelling the (sum of the) exponentially distributed waiting times describing the ancestry of a random sample, and the marking process describe mutation. Then the connection to the coalescent \citep{Kingman1982, Hudson1983, Tajima1983} becomes obvious, making the Laplace transform a natural choice \citep{Weissman2017}.
+
+Moreover, used in mathematical fields like queueing theory, the Laplace transform often provides us with an alternative description of the behaviour of a system often simplifying its analysis in the process. In essence, this is what the generating function (GF) method as described in \citet{Lohse2011} does. Using the probabilistic interpretation of the Laplace and the fact that convolution is multiplication, one can come up with a much simpler, recursive and automated, description of the distribution of coalescence times given a set of samples and a demographic model. Phrased differently, being given a flow diagram or coalescent state space graph describing all possible transitions within the coalescent process, one can readily write down all associated expressions in the Laplace domain. This is not the case for the time domain.\\
+
+This framework has been used to develop likelihood-based inference methods both for IM-type demographic histories \citep{Lohse2011, Bunnefeld2015, Lohse2016} as well as estimating sweep parameters \citep{Bisschop2021}. Given that the GF relies on generating the coalescent state space graph, and that this state space graph will grow superexponentially with sample size, there are limitations on the sample size and number of events for which the GF can be generated and more importantly evaluated within reasonable (memory) space and time. These two bottlenecks, the ability to make make mathematically tractable descriptions of a problem as well the ability to efficiently implement the solution hold for all inference problems. The first issue is generally solved by making simplifying assumptions about recombination, either ignoring the information contained within closely linked variants completely \citep{Gutenkunst2009, Excoffier2013}, or by only ignoring recombination within very short blocks \citep{Yang2002, Hey2004}. Additionally, one can limit the description to a small number of lineages or only consider very basic underlying (demographic) models.
+
+The second issue is often very closely connected to the type of mathematical description used. In general, one will benefit from the potential to implement a particular solution in terms of data structures for which efficient algorithms exist for each of the required basic operations. For example, preserving matrix structure up to the point of evaluation, as used in phase-type theory \citep{Hobolth2019}, will often have a positive impact on performance due to the existence of many efficient algorithms for linear algebra operations.
+
+So far, all inference approaches using the GF, rely on deriving the probability of observing each of the different block-wise site frequency spectrum (bSFS) vectors. These combinations of mutation configurations along the distinguished branch types within blocks of a certain length summarise the joint distribution of linked polymorphisms \citep{Bunnefeld2015}. However, depending on both the number of observed mutations and the number of distinguished branch types, they require repeated differentiation of the entire GF. As a consequence, any naive implementation of the GF with higher-order derivatives using a computer algebra system (CAS) will quickly run into computational bottlenecks, essentially limiting the extendability of the framework.
+
+Previous efforts to make the framework more efficient have targeted the first bottleneck category by limiting the number of distinguishable branchtypes, limiting the number of occurrences of particular events, and using symmetries within the recursive description \citep{Lohse2016}. No attempts have been made to tackle the second bottleneck and describe the problem in a way that allows for more efficient computation.\\
+
+Here we present the first open-source implementation of the GF framework and lay out the key algorithms that allow us to efficiently calculate the bSFS by using the correspondence between the recursive formulation of the Laplace transform and the coalescent state space graph. The focus on the bSFS is only superficial however. Any future extension of the library will make use of the concepts outlined here.
+
+First, we will outline how the GF can be represented more succinctly. Secondly, we will lay out the graph traversal algorithm allowing us to efficiently evaluate the GF. We will then apply this to the bSFS by using the algorithm to propagate the coefficients of a truncated Taylor series through the graph. %Lastly
+
+%most of the stuff below has been used.
+%The Laplace transform of a random variable $X$ has a clear probabilistic interpretation. Think of the random variable as describing the length of an interval. If a Poisson marking process with intensity $\omega$ marks the interval, then the Laplace transform $f^*(\omega)$ is the probability of not observing any marks in the considered interval \citep{Rade1972}. In a coalescent context, the marking process could represent mutations happening along the branches described by $X$, or any other competing process with exponentially distributed inter-event times. As such the Laplace transform is a natural choice when it comes to the coalescent \citep{Weissman2017}. On top of that, the transform has the neat property that the sum of two independent random variables is equal to the product of the respective Laplace transforms. This means that one can readily write down the Laplace transformed distribution of the sum of all inter-event times, or the time to the most recent common ancestor (\textit{tmrca}), associated with any particular sequence of coalescence events \citep{Lohse2011}. As such the Laplace transform of the coalescent history of a sample presents itself as a sum across topologies, with each term a product of factors describing a single (coalescence) events (see \ref{GF_description}).
+
+%%SECTION LT as array and paths
+\section{Recursive description of the Laplace transform} \label{GF_description}
+%this section should make everything about the Laplace transform clear such that it is obvious to understand in the next section what the equations look like, and what the dummy variables associated with branch types do and mean.
+\subsection{single population}
+
+Given a sample of $n$ uniquely labelled lineages $\Omega = \{a, ..., n\}$ coming from a single population, we can represent the state space of all (neutral) pairwise coalescence events as a rooted directed graph. As lineages coalesce we move through the graph from the source node, representing the sampled state, to the root or most recent common ancestor (mrca). Each node can then be uniquely labelled by one of the partitions of $\Omega$. And the total number of paths through the graph will equal the number of ranked topologies: $n!(n-1)!/2^{n-1}$ \citep{Lohse2016} %there must be a better citation for this! This is the simple idea 
+
+For $k$ uncoalesced lineages, the rate of coalescence is ${k}\choose{2}$ (in units of $2N_e$ generations). Because each step is conditionally independent of the previous and as outlined in the introduction, the Laplace transform of the sum of inter-event times or the time to the most recent common ancestor ($t_{mrca}$) is a simple product of the Laplace transforms of the random variable describing the waiting time to go from $k$ to $k-1$ lineages. As such, we can associate each edge of the directed graph with a single equation describing this transition. The Laplace transform of the $t_{mrca}$ for a single (labeled) topology can then be retrieved by multiplying the equations associated with a single path of the graph. Likewise, the entire GF is the sum of all expressions retrieved by a depth-first traversal of the graph (see \ref{fig:graph}). %
+
+%what a SINGLE EQUATION will look like
+Knowing that the equation associated with a single edge in the coalescent state space graph as outlined above, gives the probability of observing the coalescence event prior to any other event happening at rate $\omega$, for any two out of $k$ lineages, the Laplace transform is $f^{*}(\omega) = \frac{1}{{k\choose{2}} + \omega}$. Note that in general we will associate each of the $k$ ancestral branch types with a unique dummy variable. Replacing $\omega$ by $\sum_{i=1}^{k} \omega_i$, we can retrieve the coalescence time distribution for each of the $k$ distinguished branch types \citep{Lohse2011}. 
+
+%extend to MULTIPLE EVENTS
+\subsection{general form}
+So far, we have only dealt with coalescence in a single population. However, 
+given that $min(X, Y) \sim exp(\omega_1+\omega_2)$ when both $X \sim exp(\omega_1)$ and $Y \sim exp(\omega_2)$, we can readily extend the given description to include coalescence in multiple populations. And/or we can describe scenarios where multiple types of events (migration, recombination, ...) happening at rate $\lambda_k$ are competing along the same set of branches \citep{Lohse2011}. Each edge of the coalescent state space graph is therefor associated with a single Laplace with the following general form describing an event happening along one of the $k$ distinguished branchtypes. %would be nice if I could make it clear that these branchtypes represent the branchtype configuration in the node from which the edge is leaving.
+
+%%EQ_GENERAL_FORM_LT
+\begin{equation} \label{eq:general_form}
+f[\boldsymbol{\omega}] = \frac{1}{\sum c_i\kappa_i + \sum l_j\lambda_j + \sum o_k \omega_k} 
+\end{equation}
+Here, Roman letters represent integers counting the number of ways a certain event can take place ($c_i, l_j$) given the current state space, or the number of branches of a particular type ($o_i$). The Greek letters represent the rate of the associated competing processes. Note that in the case of coalescence with multiple populations, rates are relative and given by $\kappa_i = N_{e_{i}}/N_{e_{ref}}$.
+
+Each equation can be encoded as a matrix with two rows containing the integer coefficients ($c_i, l_j, o_k$). The first row represents the numerator and will only contain a single non-zero value. The sec ond row then represents the denominator. Storing the equations this way ensures we can efficiently substitute in parameter values by taking the dot product with a vector representing a point in parameter space ($\kappa_i, \lambda_j, \omega_k$) once the Laplace transform needs to be evaluated. Also, storing equation coefficients in array form allows us to efficiently perform operations on the equations (see \ref{discrete_events}). A minimal representation of the GF consists of an array containing all unique equations, and an array of arrays with equation indices describing all paths through the graph. 
+
+%%FIG:GRAPH
+\begin{figure}
+\begin{center}
+\includegraphics[scale=0.5]{figures/temp2b.png} \label{fig:graph}
+\end{center}
+%caption
+\caption{\textbf{From coalescent state space to equation array:} coalescent state space graph for two populations $A$ and $B$ with 2 and 1 unphased sample(s) respectively. The demographic model assumes a single mass migration event from population $B$ to $A$ back in time.}
+\end{figure}
+
+\subsection{adding in events}
+
+In a structured population, we require at least one type of migration event to ensure lineages eventually all end up in the same population to allow for coalescence. Currently, two types of migration events have been implemented: uni-directional migration and mass migration. Other events can readily be incorporated by adding in a method that provides a description of what the event does to the configuration of lineages. In the state space graph, nodes are labelled as partitions of the samples present in each of the subpopulations. One could extent this description and therefore allow for events, like mutations, that do not affect the configuration of lineages. However, there are more efficient ways of dealing with mutations (see \ref{bsfs})
+
+Note that to limit state space size and in line with \citet{Lohse2016} migration is indeed limited to being uni-directional. Also, although both migration events are implemented as continuous exponential processes, mass migration is obviously a discrete event.
+
+\subsection{discrete events} \label{discrete_events}
+
+Initially treating discrete events as a competing exponential process we recover the GF parametrised by the discrete time $T$ of the event, by taking the inverse transform of the GF divided by its associated dummy variable ($\delta$). This has been used to incorporate mass migration and bottlenecks \citep{Lohse2011, Bunnefeld2015} as well as hard sweeps \citep{Bisschop2021}. 
+
+Previous implementations have relied on a CAS to get an analytic solution to the inverse transform. However, we can use the fact that when it comes to inverting with respect to $\delta$ each path in the graph corresponds to a product of rational functions of the form $c/(d + \delta)$ with $c, d$ constants. And, limiting the GF to a single discrete event, all equations associated with paths departing from the node representing that event are constants with respect to delta.
+
+Having stored all equation coefficients as an array, we can formulate a closed-form solution to the inverse Laplace that allows for efficient substitution of all parameter values. Note, this means that the inverse transform does not happen until the GF is being evaluated. However, one could recover the analytical expression by providing symbolic variables to the parameter vector. This would require using a CAS like \texttt{SageMath}.
+
+The result is a sum of terms of the form 
+\begin{equation}\label{eq:inverted_eq}
+C(\boldsymbol\omega)\sum(-1)^{i}\frac{e^{-P_i(\boldsymbol\omega)T}}{\prod Q_i(\boldsymbol\omega)}
+\end{equation}
+With $P_i$ equalling denominator of factor $i$ of the path, and $Q_i(\boldsymbol\omega)$ equalling product of pairwise differences of $i$ with all other denominators. And $C(\boldsymbol\omega)$ the part of the path following the discrete event. The outlined correspondence between the state space graph and the GF no longer holds for the inverted GF unless we transform the graph and collapse each section of all path leading up to the discrete event node to a new node (see fig. \ \ref{fig:equation_graph}). Once this operation has been performed, each path of the graph represents a product of factors again. Given that inverting is not performed until evaluation, we can simply store the indices of the equations and associate them to the edge leading up to the discrete event. Under the hood however, we perform one additional operation while collapsing the graph, and make the (sets of) equations the actual nodes of the graph (see fig. \ \ref{fig:equation_graph} C). This simplifies any algorithm only dealing with the equations once generated (see \ref{bsfs}). Finally, note that so far, this approach is only compatible with a single discrete event. Adding in more discrete events would require the use of a CAS to determine the inverse transform.
+
+%%FIG:EQUATION_GRAPH
+\begin{figure}
+\begin{center}
+\includegraphics[scale=0.5]{figures/temp3.png}\label{fig:equation_graph}
+\end{center}
+%caption
+\caption{\textbf{From coalescent state space to equation graph:} setup identical as fig.\ \ref{fig:graph}. A shows the initial coalescent state space graph, while B shows the collapsed form grouping all parts of each path that require inverting with respect to the dummy variable associated with the discrete event. C takes this logic one step further turning the (sets of) equations previously associated with the edges into nodes, simplifying algorithms that do not require state space information.}
+\end{figure}
+
+%%%GRAPH TRAVERSAL
+\section{graph traversal} \label{graph_traversal}
+
+Given an equation graph (as described in fig.\ \ref{fig:equation_graph}) and a dependency sequence describing the evaluation order of the graph, a general algorithm to propagate any evaluation of the equations associated with each node is given by alg.\ \ref{alg:propagation}. It relies on the fact that implicitly the edges of the graph represent multiplication. Once both multiplication and addition have been defined for the propagated values we can rely on the commutative property to efficiently traverse the graph towards the root. Especially in the case where addition is a less costly operation than multiplication (as is the case for polynomials, see \ref{bsfs}), it will pay off to add the values associated with the children of a node prior to multiplication.
+
+%%ALG PROPAGATION	
+\begin{algorithm}\label{alg:propagation}
+    \SetKwInOut{Input}{Input}
+    %\SetKwInOut{Output}{Output}
+	
+    \underline{function PROPAGATE}\;
+    \Input{adjacency list of graph, node\_values, evaluation\_order}
+    
+    \ForEach{parent in evaluation\_order}{
+    	children = graph[parent]\;
+    	temp = 0\;
+    	\If{children}{
+    \ForEach{child in children}{
+    temp+=node\_values[child]\;
+    }
+    \eIf{parent not root}{node\_values[parent] = PRODUCT(temp, node\_values[parent])\;}
+   {\Return{temp\;}}
+    }
+     		}
+
+    \caption{Propagate values through graph.}
+\end{algorithm}
+
+\section{blockwise site frequency spectrum} \label{bsfs}
+
+The block-wise site frequency spectrum or bSFS is the vector of site frequency spectrum counts in short blocks of a fixed length \citep{Bunnefeld2015}. It is the probability of seeing $k_i$ mutations on each of the $i$ distinguished branchtypes. For an unphased sample of size 3 the bSFS would be a vector of the form $\{k_1, k_2\}$ with $k_1$ and $k_2$ representing the number of singletons and doubletons respectively. Each count is an element within the interval $[0, 1, 2, ... , k_{max} + 1]$ where $k_{max} + 1$ is used to bin all mutation configurations with more than $k_{max}$ mutations. 
+
+Deriving the probability for each of the $k_{max + 2}^c$ possible bSFS configurations, with $c$ the length of the bSFS vector, has thus far been the way in which the recursively generated Laplace transform of coalescence time distributions has been used. The probability for configuration $\boldsymbol{k}$ is equal to $(-\theta/2)^{\sum \boldsymbol{k}}$ times the coefficient of $\boldsymbol{\omega}^{\boldsymbol{k}}$ in a truncated multivariate Taylor series of the GF (see eq.\ (1) in \citet{Lohse2011} for details).
+
+Any naive approach, based on calculating all higher order derivatives using a CAS, will suffer from an explosion in the number of terms due to the Leibniz or product rule when differentiating. Generally a CAS will fail to take into account the fact that the same partial derivatives are computed multiple times. This problem has been well-studied for the purpose of automatic differentiation algorithms \citep{Neidinger1992, Neidinger1995, Griewank2000, Bettencourt2019}. One possible approach to overcome this issue consists of implementing recurrence relations on how to combine truncated Taylor series. Thus essentially building higher-order derivatives from the ground up by defining the series coefficients for all elementary functions and defining the recurrence relations for arithmetic operators as well as function compositions \citep{Neidinger2013}. Here, we will not build up the derivatives from the elementary functions but will make use of the algorithm defining the product of two truncated Taylor series (see alg.\ (8) in \citet{Neidinger2013} and, see,  also adapt font). Note that adding two truncated Taylor series simply amounts to the pairwise addition of all corresponding coefficients.
+
+%%PRODUCT
+\begin{algorithm}\label{alg:product}
+    \SetKwInOut{Input}{Input}
+    \SetKwInOut{Output}{Output}
+
+    \underline{function SERIES\_PRODUCT}\;
+    \Input{Two same-size arrays of floats $a$ and $b$}
+    \Output{array $c$ of same size as $a$ and $b$}
+    \ForEach{multi-index $\boldsymbol{k}$}{
+    	$sum = 0$\;
+        \ForEach{multi-index $\boldsymbol{j} \leq$ multi-index $\boldsymbol{k}$}{
+           
+            sum = ADD(sum, $a[\boldsymbol{j}] * b[\boldsymbol{k}-\boldsymbol{j}])$\;
+        }
+        $c[\boldsymbol{k}]=$ sum\;
+        }
+    \Return $c$[ ]\;
+    \caption{Product of two truncated Taylor series \citep{Neidinger2013}.}
+\end{algorithm}
+
+
+%evaluating the equations associated with all nodes
+Because in our case the equations associated with each of the nodes of the equations graph are well characterised and fall in one of two categories depending on whether an inversion step was needed, we will benefit from defining closed-form implementations of the derivatives with respect to each of the distinguished branchtypes. Again, equations will either take the form of a rational function with a constant numerator (branchtype variables never appear in the numerator) and a multi-variate polynomial of order 1 as denominator (see eq.\ \ref{eq:general_form}). Or will be a sum of exponentials divided by higher order polynomials (see eq.\ \ref{eq:inverted_eq}). And for both cases, algorithms \ref{alg:deriv_polynomial} and \ref{alg:deriv_exponential} respectively show how operations on the integer coefficient matrix allow us to efficiently compute all the coefficients defining a truncated Taylor series expansion of these equations ready to perform the graph traversal algorithm.
+
+%dealing with marginals
+Note however that when binning the probability of seeing more than $k_{max}$ mutations for each branchtype, a single pass through the graph does not suffice. In fact, $2^{|\boldsymbol{k}|}$ passes are required. This is due to the fact that calculating the binned residual probabilities requires us to marginalise the GF over the $l$ variables for which the residual probability is determined. This amounts to setting those $l$ dummy variables to $0$, compute all derivatives for the remaining variables and propagate the coefficients of the new truncated Taylor series in $|\boldsymbol{k}| - l$ variables. Given that without having to calculate marginals a single pass would suffice, not binning probabilities, but instead calculating the probabilities of all observed mutation configuration might be more efficient in specific cases.
+
+%potential floating point precision issues
+Also remark that alg.\ \ref{alg:product} contains an explicit ADD function. This refers to the fact that care needs to be taken when summing (a subset of) the coefficients of a Taylor series. Because these will be both positive and negative, catastrophic cancellation might occur leading to accuracy loss. We have implemented the compensated summation algorithm of Ogita-Rump-Oishi \citep{Ogita2005} as an efficient way to bound the potential loss in accuracy. %another way of handling this would be to temporarily increase numeric precision at the crucial steps.
+Another advantage of using Taylor series coefficients rather than the derivatives is that the coefficients will always be smaller by a factor $(\sum \boldsymbol{k})!$ leading to less cumulative roundoff error.
+
+
+\section{simplification}
+%describe use of branchtype dict and labelling of lineages
+%removing root + removing phase
+%explain how this is being done in agemo
+
+Following \citet{Lohse2016}, we can simplify the GF by taking away root and/or phase information.
+removing phase info: replacing all unique labels by a single label determined by the population they were sampled from.
+practically: do this when providing sample list.
+
+removing root: 
+practically: pass branchtype dict, mapping branchtypes to their corresponding label. How do we enforce a particular order?
+Otherwise, fully labelled 
+
+\section{example}
+%compare msprime sims against bsfs with demonstration on how to get bsfs out.
+%time to get msprime sims:
+%time to run the algorithm.
+
+
+\section{discussion}
+%current implementation: python + numba jit compilation. Compilation happening with first code evaluation, when calculating bSFS for multiple parameter points not an issue.
+%
+In summary, the work presented here constitutes a CAS-independent, open-source implementation of the GF. A general outline has been given on how to rely on the correspondence between the coalescent state space graph and the GF to query the distribution of Laplace transformed coalescence times efficiently. In particular, algorithms have been laid out to efficiently calculate the bSFS making this package ideal as a backend for likelihood calculations.
+
+Currently, \texttt{agemo} is implemented in \texttt{python 3}, relying on \texttt{numba} jit-compilation to speed up the critical parts of the code. Compiling the code using \texttt{numba} has a few consequences. Firstly, compilation happens each time the code is run and will require a few seconds. This is generally not an issue given that usually many points in parameter space will be evaluated for example when calculating the bSFS. Secondly, a few of the \texttt{numpy} inbuilt numerical precision algorithms ... no longer being used following jit-compilation. This has ... us to implement a compensated sum algorithm.  A better/faster solution would be to temporarily increase machine precision for the evaluation of particular sums. This is not possible using \texttt{numba} however and will require us to transfer part of the code to \texttt{C}.
+
+Because we have opted to no longer depend on a CAS to calculate derivatives, no longer placing the evaluation order of any expression out of user's reach allowing us to alleviate potential floating point precision issues. This was not possible previously forcing any implementation to use rationals rather than floats increasing computation time.
+However, there might be a point whenever one might want to analyse more complex models (e.g.\ containing more than one discrete event) that the need for relying on symbolic algebra or automatic differentiation becomes necessary. This does not change the general idea outlined in this paper. It will still pay off to evaluate the building block equations associated with the coalescent state space graph first, and then rely on graph traversal to get to the correct results. This could be achieved by putting in place a function to propagate a user-provided array (with first dimension equal to the number of equation nodes) through the graph using user-defined addition and multiplication rules. This way, we would not have the additional burden of having a CAS as a direct dependency.
+
+There are more efficient algorithms to multiply (truncated) multivariate polynomials. The fast Fourier transform (FFT) would allow us to perform the operation at $\mathcal{O}(n log(n))$ with $n$ the order of the polynomial instead of $\mathcal{O}(n^2)$ for the current multiplication. However, gains would only be noticeable for a large number of distinguished branchtypes, or a really large $k_{max}$ values. 
+\newline
+
+These algorithms will not suddenly make it possible to extent the usage of the GF to any arbitrary model and sample size. The fact remains that the number of sample configurations grows superexponentially with sample size \citep{Lohse2016}. %will have to test the current limitations of the model
+\newline
+
+%future extensions
+Any
+incorporate more demographic events (bottleneck, ) and incorporate hard sweep approximations \citep{Bisschop2021}.
+%input tree
+Although most people still process vcfs when it comes to mutation data. There is the more succinct treesequence format containing both topology information as well as mutations. It would therefore make a lot of sense to add on the ability to calculate the likelihood of a mutation configuration under a particular coalescent model as given by a marginal tree from a treesequence. This boils down to restricting the GF for that particular model to the observed topology, count the number of mutations of each distinguished branchtype and compute its probability.
+
+\section*{acknowledgements}
+This work was supported by an ERC starting grant (ModelGenomLand, 757648)
+
+\bibliography{../../Latex/Bibliography/library}
+\beginsupplement
+
+\section*{Supplementary Information}
+\subsection*{closed-form derivatives}
+%%DERIVATIVES POLYNOMIAL
+%as formula
+
+\begin{equation}
+\frac{\partial f(\bold{x})^{-1}}{\partial^{k_i} x_i} = (-1)^s s! \frac{c^{k_i}_i}{f(\bold{x})^2}
+\end{equation}
+with $s = \sum_{i=1} k_i$ and $f(\bold{x}) = c_i x_i + b$
+%%DERIVATIVES EXPONENTIAL
+%
+\begin{equation}
+\frac{\partial g(\bold{x})}{\partial^{k_i} x_i} = c^sc_i^{k_i}g(\bold{x})	
+\end{equation}
+
+with $s = \sum_{i=1} k_i$ and $g(\bold{x}) = e^{c*\sum c_i x_i + b}$
+
+%%INVERSE LAPLACE
+
+
+\end{document}
